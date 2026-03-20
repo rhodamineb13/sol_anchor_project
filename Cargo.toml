@@ -1,0 +1,9 @@
+[package]
+name = "sol_anchor_project"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+borsh = "1.6.1"
+solana-program = "4.0.0"
+solana-system-interface = { version = "2", features = ["bincode"] }
