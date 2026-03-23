@@ -4,7 +4,7 @@ use solana_program::{
     account_info::{AccountInfo, next_account_info},
     clock::Clock,
     entrypoint::ProgramResult,
-    program::invoke_signed,
+    program::{invoke, invoke_signed},
     program_error::ProgramError,
     pubkey::Pubkey,
     sysvar::Sysvar,
@@ -27,7 +27,12 @@ pub struct Campaign {
     pub claimed: bool,
 }
 
-pub fn create_new_campaign(accounts: &[AccountInfo], goal: u64, deadline: i64) -> ProgramResult {
+pub fn create_new_campaign(
+    accounts: &[AccountInfo],
+    program_id: &Pubkey,
+    goal: u64,
+    deadline: i64,
+) -> ProgramResult {
     let account_iter = &mut accounts.iter();
     let campaign_account = next_account_info(account_iter)?;
 
@@ -41,7 +46,7 @@ pub fn create_new_campaign(accounts: &[AccountInfo], goal: u64, deadline: i64) -
         campaign.goal = goal;
         campaign.deadline = deadline;
         campaign.claimed = false;
-        campaign.creator = Pubkey::new_unique();
+        campaign.creator = *program_id;
         campaign.raised = 0;
 
         campaign.serialize(&mut *campaign_account.data.borrow_mut())?;
@@ -53,24 +58,38 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
     let accounts_iter = &mut accounts.iter();
     let payer_acc = next_account_info(accounts_iter)?;
     let campaign_acc = next_account_info(accounts_iter)?;
-    {
-        let campaign = Campaign::try_from_slice(&campaign_acc.try_borrow_mut_data()?)?;
-        if campaign.raised + amount > campaign.goal {
-            return Err(ProgramError::InvalidArgument);
-        }
+    let mut campaign = Campaign::try_from_slice(&campaign_acc.try_borrow_mut_data()?)?;
+    if campaign.raised + amount > campaign.goal {
+        return Err(ProgramError::InvalidArgument);
     }
 
-    let (vault_pda, bump) =
+    if !payer_acc.is_signer {
+        return Err(ProgramError::IncorrectAuthority);
+    }
+
+    let (vault_pda, _) =
         Pubkey::find_program_address(&[b"vault", campaign_acc.key.as_ref()], program_id);
 
-    invoke_signed(
+    let res = invoke(
         &system_instruction::transfer(payer_acc.key, &vault_pda, amount),
         &[payer_acc.clone(), campaign_acc.clone()],
-        &[&[b"vault", campaign_acc.key.as_ref(), &[bump]]],
-    )
+    );
+
+    match res {
+        Ok(()) => {
+            campaign.raised += amount;
+            let res = campaign.serialize(&mut *campaign_acc.data.borrow_mut());
+
+            match res {
+                Ok(()) => Ok(()),
+                Err(_) => Err(ProgramError::BorshIoError),
+            }
+        }
+        Err(arg) => Err(arg),
+    }
 }
 
-pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> ProgramResult {
+pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
     let payer_acc = next_account_info(accounts_iter)?;
     let campaign_acc = next_account_info(accounts_iter)?;
@@ -78,19 +97,74 @@ pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> P
     let clock = Clock::get()?;
     let current_time = clock.unix_timestamp;
 
-    {
-        let campaign = Campaign::try_from_slice(&campaign_acc.try_borrow_mut_data()?)?;
-        if campaign.raised < amount || current_time < campaign.deadline {
-            return Err(ProgramError::InvalidArgument);
-        }
+    let mut campaign = Campaign::try_from_slice(&campaign_acc.try_borrow_mut_data()?)?;
+
+    if campaign.raised < campaign.goal || current_time < campaign.deadline {
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    if campaign.creator != *program_id {
+        return Err(ProgramError::IllegalOwner);
     }
 
     let (vault_pda, bump) =
         Pubkey::find_program_address(&[b"vault", campaign_acc.key.as_ref()], program_id);
 
-    invoke_signed(
+    let res = invoke_signed(
+        &system_instruction::transfer(&vault_pda, &campaign.creator, campaign.raised),
+        &[campaign_acc.clone()],
+        &[&[b"vault", campaign_acc.key.as_ref(), &[bump]]],
+    );
+
+    match res {
+        Ok(()) => {
+            campaign.raised = 0;
+            let res = campaign.serialize(&mut *campaign_acc.data.borrow_mut());
+
+            match res {
+                Ok(()) => Ok(()),
+                Err(_) => Err(ProgramError::BorshIoError),
+            }
+        }
+        Err(arg) => Err(arg),
+    }
+}
+
+pub fn refund(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> ProgramResult {
+    let accounts_iter = &mut accounts.iter();
+    let payer_acc = next_account_info(accounts_iter)?;
+    let campaign_acc = next_account_info(accounts_iter)?;
+
+    let clock = Clock::get()?;
+    let current_time = clock.unix_timestamp;
+
+    let mut campaign = Campaign::try_from_slice(&campaign_acc.try_borrow_mut_data()?)?;
+    if campaign.raised >= campaign.goal || current_time < campaign.deadline {
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    let (vault_pda, bump) =
+        Pubkey::find_program_address(&[b"vault", campaign_acc.key.as_ref()], program_id);
+
+    let res = invoke_signed(
         &system_instruction::transfer(&vault_pda, payer_acc.key, amount),
         &[payer_acc.clone(), campaign_acc.clone()],
         &[&[b"vault", campaign_acc.key.as_ref(), &[bump]]],
-    )
+    );
+
+    match res {
+        Ok(()) => {
+            if campaign.raised < amount {
+                Err(ProgramError::InsufficientFunds)
+            } else {
+                campaign.raised -= amount;
+                let res = campaign.serialize(&mut *campaign_acc.data.borrow_mut());
+                match res {
+                    Ok(()) => Ok(()),
+                    Err(_) => Err(ProgramError::BorshIoError),
+                }
+            }
+        }
+        Err(arg) => Err(arg),
+    }
 }

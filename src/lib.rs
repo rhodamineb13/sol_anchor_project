@@ -3,13 +3,14 @@ use solana_program::{
     account_info::AccountInfo, entrypoint, entrypoint::ProgramResult, pubkey::Pubkey,
 };
 mod campaign;
-use campaign::{contribute, create_new_campaign, withdraw};
+use campaign::{contribute, create_new_campaign, refund, withdraw};
 
 #[derive(BorshSerialize, BorshDeserialize)]
 pub enum Instructions {
     CreateNewAccount(u64, i64),
     Contribute(u64),
-    Withdraw(u64),
+    Withdraw,
+    Refund(u64),
 }
 
 // Declare and export the program's entrypoint
@@ -24,12 +25,12 @@ pub fn process_instruction(
     let cmd = Instructions::try_from_slice(_instruction_data)?;
     match cmd {
         Instructions::CreateNewAccount(goal, deadline) => {
-            create_new_campaign(accounts, goal, deadline)
+            create_new_campaign(accounts, program_id, goal, deadline)
         }
         Instructions::Contribute(amount) => contribute(program_id, accounts, amount),
-        Instructions::Withdraw(amount) => withdraw(program_id, accounts, amount),
+        Instructions::Withdraw => withdraw(program_id, accounts),
+        Instructions::Refund(amount) => refund(program_id, accounts, amount),
     }?;
 
     Ok(())
 }
-
