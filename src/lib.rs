@@ -7,7 +7,7 @@ use campaign::{contribute, create_new_campaign, refund, withdraw};
 
 #[derive(BorshSerialize, BorshDeserialize)]
 pub enum Instructions {
-    CreateNewAccount(String, u64, i64),
+    CreateNewAccount(u64, i64),
     Contribute(u64),
     Withdraw,
     Refund(u64),
@@ -24,8 +24,8 @@ pub fn process_instruction(
 ) -> ProgramResult {
     let cmd = Instructions::try_from_slice(_instruction_data)?;
     match cmd {
-        Instructions::CreateNewAccount(name, goal, deadline) => {
-            create_new_campaign(accounts, name, goal, deadline)
+        Instructions::CreateNewAccount(goal, deadline) => {
+            create_new_campaign(accounts, goal, deadline)
         }
         Instructions::Contribute(amount) => contribute(program_id, accounts, amount),
         Instructions::Withdraw => withdraw(program_id, accounts),

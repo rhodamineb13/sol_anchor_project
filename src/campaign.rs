@@ -27,16 +27,14 @@ pub struct Campaign {
     pub claimed: bool,
 }
 
-pub fn create_new_campaign(
-    accounts: &[AccountInfo],
-    name: String,
-    goal: u64,
-    deadline: i64,
-) -> ProgramResult {
+pub fn create_new_campaign(accounts: &[AccountInfo], goal: u64, deadline: i64) -> ProgramResult {
     let account_iter = &mut accounts.iter();
     let campaign_account = next_account_info(account_iter)?;
 
     let mut campaign = Campaign::try_from_slice(&campaign_account.try_borrow_mut_data()?)?;
+
+    let key = campaign_account.key.to_bytes();
+    let creator = Pubkey::new_from_array(key);
 
     let clock = Clock::get()?;
     let current_time = clock.unix_timestamp;
@@ -46,7 +44,7 @@ pub fn create_new_campaign(
         campaign.goal = goal;
         campaign.deadline = deadline;
         campaign.claimed = false;
-        campaign.creator = Pubkey::from_str(&name).unwrap();
+        campaign.creator = creator;
         campaign.raised = 0;
 
         campaign.serialize(&mut *campaign_account.data.borrow_mut())?;
@@ -58,6 +56,7 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
     let accounts_iter = &mut accounts.iter();
     let payer_acc = next_account_info(accounts_iter)?;
     let campaign_acc = next_account_info(accounts_iter)?;
+    let system_program = next_account_info(accounts_iter)?;
     let mut campaign = Campaign::try_from_slice(&campaign_acc.try_borrow_mut_data()?)?;
 
     if campaign.claimed {
@@ -77,12 +76,16 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
 
     let res = invoke(
         &system_instruction::transfer(payer_acc.key, &vault_pda, amount),
-        &[payer_acc.clone(), campaign_acc.clone()],
+        &[
+            payer_acc.clone(),
+            campaign_acc.clone(),
+            system_program.clone(),
+        ],
     );
 
     match res {
         Ok(()) => {
-            campaign.raised += amount;
+            campaign.raised.checked_add(amount);
             let res = campaign.serialize(&mut *campaign_acc.data.borrow_mut());
 
             match res {
@@ -104,11 +107,14 @@ pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult 
 
     let mut campaign = Campaign::try_from_slice(&campaign_acc.try_borrow_mut_data()?)?;
 
+    if campaign.claimed {
+        return Err(ProgramError::InvalidAccountData);
+    }
     if campaign.raised < campaign.goal || current_time < campaign.deadline {
         return Err(ProgramError::InvalidArgument);
     }
 
-    if !campaign_acc.is_signer {
+    if campaign_acc.owner != program_id {
         return Err(ProgramError::IllegalOwner);
     }
 
@@ -167,12 +173,10 @@ pub fn refund(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> Pro
             if campaign.raised < amount {
                 Err(ProgramError::InsufficientFunds)
             } else {
-                campaign.raised -= amount;
-                let res = campaign.serialize(&mut *campaign_acc.data.borrow_mut());
-                match res {
-                    Ok(()) => Ok(()),
-                    Err(_) => Err(ProgramError::BorshIoError),
-                }
+                campaign.raised.checked_sub(amount);
+                campaign
+                    .serialize(&mut *campaign_acc.data.borrow_mut())
+                    .map_err(|_| ProgramError::BorshIoError)
             }
         }
         Err(arg) => Err(arg),
