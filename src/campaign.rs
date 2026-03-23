@@ -27,14 +27,24 @@ pub struct Campaign {
     pub claimed: bool,
 }
 
-pub fn create_new_campaign(accounts: &[AccountInfo], goal: u64, deadline: i64) -> ProgramResult {
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct Donor {
+    pub id: Pubkey,
+    pub total_donated: u64,
+}
+
+pub fn create_new_campaign(
+    accounts: &[AccountInfo],
+    program_id: &Pubkey,
+    goal: u64,
+    deadline: i64,
+) -> ProgramResult {
     let account_iter = &mut accounts.iter();
     let campaign_account = next_account_info(account_iter)?;
 
     let mut campaign = Campaign::try_from_slice(&campaign_account.try_borrow_mut_data()?)?;
 
-    let key = campaign_account.key.to_bytes();
-    let creator = Pubkey::new_from_array(key);
+    let creator = *program_id;
 
     let clock = Clock::get()?;
     let current_time = clock.unix_timestamp;
@@ -58,6 +68,7 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
     let campaign_acc = next_account_info(accounts_iter)?;
     let system_program = next_account_info(accounts_iter)?;
     let mut campaign = Campaign::try_from_slice(&campaign_acc.try_borrow_mut_data()?)?;
+    let mut donor = Donor::try_from_slice(&payer_acc.try_borrow_mut_data()?)?;
 
     if campaign.claimed {
         return Err(ProgramError::InvalidAccountData);
@@ -85,11 +96,26 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
 
     match res {
         Ok(()) => {
-            campaign.raised.checked_add(amount);
+            let opt = campaign.raised.checked_add(amount);
+            match opt {
+                Some(new_val) => campaign.raised = new_val,
+                None => (),
+            };
             let res = campaign.serialize(&mut *campaign_acc.data.borrow_mut());
 
             match res {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    let opt = donor.total_donated.checked_add(amount);
+                    match opt {
+                        Some(new_val) => {
+                            donor.total_donated = new_val;
+                            donor
+                                .serialize(&mut *payer_acc.data.borrow_mut())
+                                .map_err(|_| ProgramError::BorshIoError)
+                        }
+                        None => Err(ProgramError::ArithmeticOverflow),
+                    }
+                }
                 Err(_) => Err(ProgramError::BorshIoError),
             }
         }
@@ -173,7 +199,11 @@ pub fn refund(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> Pro
             if campaign.raised < amount {
                 Err(ProgramError::InsufficientFunds)
             } else {
-                campaign.raised.checked_sub(amount);
+                let opt = campaign.raised.checked_sub(amount);
+                match opt {
+                    Some(new_val) => campaign.raised = new_val,
+                    None => (),
+                }
                 campaign
                     .serialize(&mut *campaign_acc.data.borrow_mut())
                     .map_err(|_| ProgramError::BorshIoError)
