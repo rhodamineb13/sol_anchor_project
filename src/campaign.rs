@@ -10,7 +10,7 @@ use solana_program::{
     sysvar::Sysvar,
 };
 use solana_system_interface::instruction as system_instruction;
-use std::error::Error;
+use std::{error::Error, str::FromStr};
 
 #[derive(BorshSerialize, BorshDeserialize, Debug)]
 enum CampaignError {
@@ -29,7 +29,7 @@ pub struct Campaign {
 
 pub fn create_new_campaign(
     accounts: &[AccountInfo],
-    program_id: &Pubkey,
+    name: String,
     goal: u64,
     deadline: i64,
 ) -> ProgramResult {
@@ -46,7 +46,7 @@ pub fn create_new_campaign(
         campaign.goal = goal;
         campaign.deadline = deadline;
         campaign.claimed = false;
-        campaign.creator = *program_id;
+        campaign.creator = Pubkey::from_str(&name).unwrap();
         campaign.raised = 0;
 
         campaign.serialize(&mut *campaign_account.data.borrow_mut())?;
@@ -59,6 +59,11 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
     let payer_acc = next_account_info(accounts_iter)?;
     let campaign_acc = next_account_info(accounts_iter)?;
     let mut campaign = Campaign::try_from_slice(&campaign_acc.try_borrow_mut_data()?)?;
+
+    if campaign.claimed {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
     if campaign.raised + amount > campaign.goal {
         return Err(ProgramError::InvalidArgument);
     }
@@ -91,8 +96,8 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
 
 pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
-    let payer_acc = next_account_info(accounts_iter)?;
     let campaign_acc = next_account_info(accounts_iter)?;
+    let system_program = next_account_info(accounts_iter)?;
 
     let clock = Clock::get()?;
     let current_time = clock.unix_timestamp;
@@ -103,7 +108,7 @@ pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult 
         return Err(ProgramError::InvalidArgument);
     }
 
-    if campaign.creator != *program_id {
+    if !campaign_acc.is_signer {
         return Err(ProgramError::IllegalOwner);
     }
 
@@ -112,13 +117,13 @@ pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult 
 
     let res = invoke_signed(
         &system_instruction::transfer(&vault_pda, &campaign.creator, campaign.raised),
-        &[campaign_acc.clone()],
+        &[campaign_acc.clone(), system_program.clone()],
         &[&[b"vault", campaign_acc.key.as_ref(), &[bump]]],
     );
 
     match res {
         Ok(()) => {
-            campaign.raised = 0;
+            campaign.claimed = true;
             let res = campaign.serialize(&mut *campaign_acc.data.borrow_mut());
 
             match res {
@@ -134,6 +139,7 @@ pub fn refund(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> Pro
     let accounts_iter = &mut accounts.iter();
     let payer_acc = next_account_info(accounts_iter)?;
     let campaign_acc = next_account_info(accounts_iter)?;
+    let system_program = next_account_info(accounts_iter)?;
 
     let clock = Clock::get()?;
     let current_time = clock.unix_timestamp;
@@ -148,7 +154,11 @@ pub fn refund(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> Pro
 
     let res = invoke_signed(
         &system_instruction::transfer(&vault_pda, payer_acc.key, amount),
-        &[payer_acc.clone(), campaign_acc.clone()],
+        &[
+            payer_acc.clone(),
+            campaign_acc.clone(),
+            system_program.clone(),
+        ],
         &[&[b"vault", campaign_acc.key.as_ref(), &[bump]]],
     );
 
