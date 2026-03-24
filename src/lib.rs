@@ -10,7 +10,7 @@ pub enum Instructions {
     CreateNewAccount(u64, i64),
     Contribute(u64),
     Withdraw,
-    Refund(u64),
+    Refund,
 }
 
 // Declare and export the program's entrypoint
@@ -29,7 +29,7 @@ pub fn process_instruction(
         }
         Instructions::Contribute(amount) => contribute(program_id, accounts, amount),
         Instructions::Withdraw => withdraw(program_id, accounts),
-        Instructions::Refund(amount) => refund(program_id, accounts, amount),
+        Instructions::Refund => refund(program_id, accounts),
     }?;
 
     Ok(())
