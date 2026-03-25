@@ -1,14 +1,7 @@
 #![allow(unused_imports)]
 use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::{
-    account_info::{AccountInfo, next_account_info},
-    clock::Clock,
-    entrypoint::ProgramResult,
-    program::{invoke, invoke_signed},
-    program_error::ProgramError,
-    pubkey::Pubkey,
-    rent::Rent,
-    sysvar::Sysvar,
+    account_info::{AccountInfo, next_account_info}, clock::Clock, entrypoint::ProgramResult, program::{invoke, invoke_signed}, program_error::ProgramError, pubkey::Pubkey, rent::Rent, sysvar::Sysvar
 };
 use solana_system_interface::instruction as system_instruction;
 use std::{error::Error, str::FromStr};
@@ -77,27 +70,19 @@ pub fn create_new_campaign(
         let span = borsh::to_vec(&campaign)?.len();
         let lamports = (Rent::get())?.minimum_balance(span);
 
-        let res = campaign
-            .serialize(&mut *campaign_account.data.borrow_mut())
-            .map_err(|_| ProgramError::BorshIoError);
-
-        match res {
-            Ok(()) => invoke(
-                &system_instruction::create_account(
-                    owner_account.key,
-                    campaign_account.key,
-                    lamports,
-                    span as u64,
-                    program_id,
-                ),
-                &[
-                    owner_account.clone(),
-                    campaign_account.clone(),
-                    system_program.clone(),
-                ],
-            ),
-            Err(args) => Err(args),
-        }
+        campaign.serialize(&mut *campaign_account.data.borrow_mut())?;
+        invoke(&system_instruction::create_account
+            (owner_account.key, 
+             campaign_account.key, 
+             lamports, 
+             span as u64, 
+             program_id),
+             &[
+                owner_account.clone(),
+                campaign_account.clone(),
+                system_program.clone(),
+             ],
+        )
     }
 }
 
@@ -122,6 +107,10 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
     let (vault_pda, _) =
         Pubkey::find_program_address(&[b"vault", campaign_acc.key.as_ref()], program_id);
 
+    if *vault_acc.key != vault.key {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
     let res = invoke(
         &system_instruction::transfer(payer_acc.key, &vault_pda, amount),
         &[
@@ -131,6 +120,10 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
             system_program.clone(),
         ],
     );
+
+    let res2 = invoke(
+        &system_instruction::create_account(from_pubkey, to_pubkey, lamports, space, owner)
+    )
 
     Ok(())
 }
@@ -206,7 +199,12 @@ pub fn refund(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
 
     let res = invoke_signed(
         &system_instruction::transfer(&vault_pda, payer_acc.key, donated),
-        &[vault_acc.clone(), payer_acc.clone(), system_program.clone()],
+        &[
+            payer_acc.clone(),
+            vault_acc.clone(),
+            campaign_acc.clone(),
+            system_program.clone(),
+        ],
         &[&[b"vault", campaign_acc.key.as_ref(), &[bump]]],
     );
 
@@ -220,9 +218,26 @@ pub fn refund(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
                     Some(new_val) => campaign.raised = new_val,
                     None => (),
                 }
-                campaign
+                let res = campaign
                     .serialize(&mut *campaign_acc.data.borrow_mut())
-                    .map_err(|_| ProgramError::BorshIoError)
+                    .map_err(|_| ProgramError::BorshIoError);
+
+                match res {
+                    Ok(()) => {
+                        let opt = donor.total_donated.checked_sub(donated);
+                        match opt {
+                            Some(val) => {
+                                donor.total_donated = val;
+                            }
+                            None => (),
+                        };
+
+                        donor
+                            .serialize(&mut *payer_acc.data.borrow_mut())
+                            .map_err(|_| ProgramError::BorshIoError)
+                    }
+                    Err(arg) => Err(arg),
+                }
             }
         }
         Err(arg) => Err(arg),
