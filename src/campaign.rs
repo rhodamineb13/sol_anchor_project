@@ -145,6 +145,15 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
                 donor
                     .serialize(&mut *payer_acc.data.borrow_mut())
                     .map_err(|_| ProgramError::BorshIoError)
+                    .and_then(|_| {
+                        if let Some(new_val) = campaign.raised.checked_add(amount) {
+                            campaign.raised = new_val;
+                        }
+
+                        campaign
+                            .serialize(&mut *campaign_acc.data.borrow_mut())
+                            .map_err(|_| ProgramError::BorshIoError)
+                    })
             } else {
                 Err(ProgramError::ArithmeticOverflow)
             }
@@ -173,7 +182,7 @@ pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult 
         return Err(ProgramError::InvalidArgument);
     }
 
-    if campaign_acc.owner != program_id {
+    if campaign_acc.owner != program_id || campaign_acc.is_signer {
         return Err(ProgramError::IllegalOwner);
     }
 
@@ -245,9 +254,17 @@ pub fn refund(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
                     Some(new_val) => campaign.raised = new_val,
                     None => (),
                 }
+                if let Some(new_val) = donor.total_donated.checked_sub(donated) {
+                    donor.total_donated = new_val;
+                }
                 campaign
                     .serialize(&mut *campaign_acc.data.borrow_mut())
                     .map_err(|_| ProgramError::BorshIoError)
+                    .and_then(|_| {
+                        donor
+                            .serialize(&mut *payer_acc.data.borrow_mut())
+                            .map_err(|_| ProgramError::BorshIoError)
+                    })
             }
         }
         Err(arg) => Err(arg),
