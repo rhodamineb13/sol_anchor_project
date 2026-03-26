@@ -55,13 +55,13 @@ pub fn create_new_campaign(
     deadline: i64,
 ) -> ProgramResult {
     let account_iter = &mut accounts.iter();
-    let owner_account = next_account_info(account_iter)?;
+    let creator_account = next_account_info(account_iter)?;
     let campaign_account = next_account_info(account_iter)?;
     let system_program = next_account_info(account_iter)?;
 
     let mut campaign = Campaign::try_from_slice(&campaign_account.try_borrow_mut_data()?)?;
 
-    let creator = *program_id;
+    let creator = *creator_account.key;
 
     let clock = Clock::get()?;
     let current_time = clock.unix_timestamp;
@@ -77,25 +77,26 @@ pub fn create_new_campaign(
         let span = borsh::to_vec(&campaign)?.len();
         let lamports = (Rent::get())?.minimum_balance(span);
 
-        let res = campaign
-            .serialize(&mut *campaign_account.data.borrow_mut())
-            .map_err(|_| ProgramError::BorshIoError);
+        let res = invoke(
+            &system_instruction::create_account(
+                creator_account.key,
+                campaign_account.key,
+                lamports,
+                span as u64,
+                program_id,
+            ),
+            &[
+                creator_account.clone(),
+                campaign_account.clone(),
+                system_program.clone(),
+            ],
+        );
 
         match res {
-            Ok(()) => invoke(
-                &system_instruction::create_account(
-                    owner_account.key,
-                    campaign_account.key,
-                    lamports,
-                    span as u64,
-                    program_id,
-                ),
-                &[
-                    owner_account.clone(),
-                    campaign_account.clone(),
-                    system_program.clone(),
-                ],
-            ),
+            Ok(()) => campaign
+                .serialize(&mut *campaign_account.data.borrow_mut())
+                .map_err(|_| ProgramError::BorshIoError),
+
             Err(args) => Err(args),
         }
     }
@@ -108,7 +109,6 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
     let campaign_acc = next_account_info(accounts_iter)?;
     let system_program = next_account_info(accounts_iter)?;
     let mut campaign = Campaign::try_from_slice(&campaign_acc.try_borrow_mut_data()?)?;
-    let mut donor = Donor::try_from_slice(&payer_acc.try_borrow_mut_data()?)?;
     let mut vault = Vault::try_from_slice(&vault_acc.try_borrow_mut_data()?)?;
 
     if campaign.claimed {
@@ -132,11 +132,32 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
         ],
     );
 
-    Ok(())
+    match res {
+        Ok(()) => {
+            if payer_acc.data_is_empty() {
+                return Err(ProgramError::UninitializedAccount);
+            }
+
+            let mut donor = Donor::try_from_slice(&payer_acc.try_borrow_mut_data()?)?;
+            if let Some(new_val) = donor.total_donated.checked_add(amount) {
+                donor.total_donated = new_val;
+
+                donor
+                    .serialize(&mut *payer_acc.data.borrow_mut())
+                    .map_err(|_| ProgramError::BorshIoError)
+            } else {
+                Err(ProgramError::ArithmeticOverflow)
+            }
+        }
+
+        Err(arg) => Err(arg),
+    }
 }
 
 pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
+    let creator_acc = next_account_info(accounts_iter)?;
+    let vault_acc = next_account_info(accounts_iter)?;
     let campaign_acc = next_account_info(accounts_iter)?;
     let system_program = next_account_info(accounts_iter)?;
 
@@ -161,7 +182,11 @@ pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult 
 
     let res = invoke_signed(
         &system_instruction::transfer(&vault_pda, &campaign.creator, campaign.raised),
-        &[campaign_acc.clone(), system_program.clone()],
+        &[
+            creator_acc.clone(),
+            vault_acc.clone(),
+            system_program.clone(),
+        ],
         &[&[b"vault", campaign_acc.key.as_ref(), &[bump]]],
     );
 
