@@ -58,10 +58,7 @@ pub fn create_new_campaign(
     let creator_account = next_account_info(account_iter)?;
     let campaign_account = next_account_info(account_iter)?;
     let system_program = next_account_info(account_iter)?;
-
-    let mut campaign = Campaign::try_from_slice(&campaign_account.try_borrow_mut_data()?)?;
-
-    if !campaign_account.is_signer {
+    if !campaign_account.is_signer || !creator_account.is_signer {
         return Err(ProgramError::IncorrectAuthority);
     }
 
@@ -72,11 +69,13 @@ pub fn create_new_campaign(
     if deadline < current_time {
         Err(ProgramError::InvalidArgument)
     } else {
-        campaign.goal = goal;
-        campaign.deadline = deadline;
-        campaign.claimed = false;
-        campaign.creator = creator;
-        campaign.raised = 0;
+        let mut campaign: Campaign = Campaign {
+            goal: goal,
+            deadline: deadline,
+            claimed: false,
+            creator: creator,
+            raised: 0,
+        };
 
         let span = borsh::to_vec(&campaign)?.len();
         let lamports = (Rent::get())?.minimum_balance(span);
@@ -114,7 +113,7 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
     let system_program = next_account_info(accounts_iter)?;
     let mut campaign = Campaign::try_from_slice(&campaign_acc.try_borrow_mut_data()?)?;
 
-    if campaign.claimed {
+    if campaign.claimed || campaign_acc.key != program_id {
         return Err(ProgramError::InvalidAccountData);
     }
 
