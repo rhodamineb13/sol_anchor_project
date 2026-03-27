@@ -61,6 +61,10 @@ pub fn create_new_campaign(
 
     let mut campaign = Campaign::try_from_slice(&campaign_account.try_borrow_mut_data()?)?;
 
+    if !campaign_account.is_signer {
+        return Err(ProgramError::IncorrectAuthority);
+    }
+
     let creator = *creator_account.key;
 
     let clock = Clock::get()?;
@@ -109,7 +113,6 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
     let campaign_acc = next_account_info(accounts_iter)?;
     let system_program = next_account_info(accounts_iter)?;
     let mut campaign = Campaign::try_from_slice(&campaign_acc.try_borrow_mut_data()?)?;
-    let mut vault = Vault::try_from_slice(&vault_acc.try_borrow_mut_data()?)?;
 
     if campaign.claimed {
         return Err(ProgramError::InvalidAccountData);
@@ -182,7 +185,11 @@ pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult 
         return Err(ProgramError::InvalidArgument);
     }
 
-    if campaign_acc.owner != program_id || campaign_acc.is_signer {
+    if campaign_acc.owner != program_id {
+        return Err(ProgramError::IllegalOwner);
+    }
+
+    if creator_acc.key != &campaign.creator {
         return Err(ProgramError::IllegalOwner);
     }
 
