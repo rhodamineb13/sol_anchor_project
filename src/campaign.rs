@@ -37,6 +37,7 @@ pub fn create_new_campaign(
     let account_iter = &mut accounts.iter();
     let creator_account = next_account_info(account_iter)?;
     let campaign_account = next_account_info(account_iter)?;
+    let vault_account = next_account_info(account_iter)?;
     let system_program = next_account_info(account_iter)?;
 
     if !campaign_account.is_signer {
@@ -52,6 +53,10 @@ pub fn create_new_campaign(
         return Err(ProgramError::InvalidArgument);
     }
 
+    if !campaign_account.data_is_empty() {
+        return Err(ProgramError::AccountAlreadyInitialized);
+    }
+
     let campaign = Campaign {
         creator: *creator_account.key,
         goal,
@@ -60,7 +65,7 @@ pub fn create_new_campaign(
         claimed: false,
     };
 
-    let span = std::mem::size_of::<Campaign>();
+    let span = borsh::to_vec(&campaign).unwrap().len();
     let lamports = Rent::get()?.minimum_balance(span);
 
     invoke(
@@ -74,6 +79,16 @@ pub fn create_new_campaign(
         &[
             creator_account.clone(),
             campaign_account.clone(),
+            system_program.clone(),
+        ],
+    )?;
+
+    let vault_rent = Rent::get()?.minimum_balance(0);
+    invoke(
+        &system_instruction::transfer(creator_account.key, vault_account.key, vault_rent),
+        &[
+            creator_account.clone(),
+            vault_account.clone(),
             system_program.clone(),
         ],
     )?;
@@ -296,7 +311,7 @@ pub fn refund(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let mut campaign = Campaign::try_from_slice(&campaign_acc.data.borrow())?;
     let clock = Clock::get()?;
 
-    if campaign_acc.owner != program_id {
+    if campaign_acc.owner != program_id || donation_record_acc.owner != program_id {
         return Err(ProgramError::InvalidAccountOwner);
     }
 
