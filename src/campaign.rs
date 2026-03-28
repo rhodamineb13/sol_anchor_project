@@ -39,6 +39,10 @@ pub fn create_new_campaign(
     let campaign_account = next_account_info(account_iter)?;
     let system_program = next_account_info(account_iter)?;
 
+    if !campaign_account.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
     if !creator_account.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
@@ -102,6 +106,12 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
         return Err(ProgramError::InvalidAccountData);
     }
 
+    let clock = Clock::get()?;
+    let current_timestamp = clock.unix_timestamp;
+    if current_timestamp >= campaign.deadline {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
     // Verify Vault PDA
     let (vault_pda, _) =
         Pubkey::find_program_address(&[b"vault", campaign_acc.key.as_ref()], program_id);
@@ -125,30 +135,41 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
     let mut donation = if donation_record_acc.data_is_empty() {
         let record = DonationRecord { amount: 0 };
         let span = borsh::to_vec(&record)?.len();
-        let lamports = Rent::get()?.minimum_balance(span);
+        let req_lamports = Rent::get()?.minimum_balance(span);
+        let current_lamports = donation_record_acc.lamports();
+
+        if current_lamports < req_lamports {
+            let lamports_to_fund = req_lamports.saturating_sub(current_lamports);
+            invoke(
+                &system_instruction::transfer(
+                    payer_acc.key,
+                    donation_record_acc.key,
+                    lamports_to_fund,
+                ),
+                &[
+                    payer_acc.clone(),
+                    donation_record_acc.clone(),
+                    system_program.clone(),
+                ],
+            )?;
+        }
 
         invoke_signed(
-            &system_instruction::create_account(
-                payer_acc.key,
-                donation_record_acc.key,
-                lamports,
-                span as u64,
-                program_id,
-            ),
-            &[
-                payer_acc.clone(),
-                donation_record_acc.clone(),
-                system_program.clone(),
-            ],
+            &system_instruction::allocate(donation_record_acc.key, span as u64),
+            &[donation_record_acc.clone(), system_program.clone()],
             &[&[
                 b"donation",
                 campaign_acc.key.as_ref(),
                 payer_acc.key.as_ref(),
                 &[bump],
             ]],
-        )?;
+        );
+
         record
     } else {
+        if donation_record_acc.owner != program_id {
+            return Err(ProgramError::IllegalOwner);
+        }
         DonationRecord::try_from_slice(&donation_record_acc.data.borrow())?
     };
 
@@ -158,18 +179,30 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
         &[payer_acc.clone(), vault_acc.clone(), system_program.clone()],
     )?;
 
-    donation.amount = donation.amount.checked_add(amount).unwrap();
-    campaign.raised = campaign.raised.checked_add(amount).unwrap();
+    let opt = donation.amount.checked_add(amount);
+    match opt {
+        Some(new_val) => {
+            campaign.raised = new_val;
 
-    donation.serialize(&mut *donation_record_acc.data.borrow_mut())?;
-    campaign.serialize(&mut *campaign_acc.data.borrow_mut())?;
+            let res = donation
+                .serialize(&mut *donation_record_acc.data.borrow_mut())
+                .and_then(|_| campaign.serialize(&mut *campaign_acc.data.borrow_mut()))
+                .map_err(|_| ProgramError::BorshIoError);
 
-    msg!(
-        "Contributed: {} lamports, total={}",
-        amount,
-        campaign.raised
-    );
-    Ok(())
+            match res {
+                Ok(()) => {
+                    msg!(
+                        "Contributed: {} lamports, total={}",
+                        amount,
+                        campaign.raised
+                    );
+                    Ok(())
+                }
+                Err(arg) => Err(arg),
+            }
+        }
+        None => Err(ProgramError::ArithmeticOverflow),
+    }
 }
 
 // Withdraws money/lamports from campaign vault to creator account.
@@ -203,7 +236,7 @@ pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult 
     }
 
     invoke_signed(
-        &system_instruction::transfer(vault_acc.key, creator_acc.key, campaign.raised),
+        &system_instruction::transfer(vault_acc.key, creator_acc.key, vault_acc.lamports()),
         &[
             vault_acc.clone(),
             creator_acc.clone(),
@@ -213,10 +246,13 @@ pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult 
     )?;
 
     campaign.claimed = true;
-    campaign.serialize(&mut *campaign_acc.data.borrow_mut())?;
-
-    msg!("Withdrawn: {} lamports", campaign.raised);
-    Ok(())
+    campaign
+        .serialize(&mut *campaign_acc.data.borrow_mut())
+        .and_then(|_| {
+            msg!("Withdrawn: {} lamports", campaign.raised);
+            Ok(())
+        })
+        .map_err(|_| ProgramError::BorshIoError)
 }
 
 // Refunds from the campaign vault to donors according to the amount they donate.
@@ -269,12 +305,25 @@ pub fn refund(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         &[&[b"vault", campaign_acc.key.as_ref(), &[vault_bump]]],
     )?;
 
-    campaign.raised = campaign.raised.checked_sub(refund_amount).unwrap();
-    donation.amount = 0;
+    let opt = campaign.raised.checked_sub(refund_amount);
+    match opt {
+        Some(new_val) => {
+            campaign.raised = new_val;
+            donation.amount = 0;
 
-    campaign.serialize(&mut *campaign_acc.data.borrow_mut())?;
-    donation.serialize(&mut *donation_record_acc.data.borrow_mut())?;
+            let res = campaign
+                .serialize(&mut *campaign_acc.data.borrow_mut())
+                .and_then(|_| donation.serialize(&mut *donation_record_acc.data.borrow_mut()))
+                .map_err(|_| ProgramError::BorshIoError);
 
-    msg!("Refunded: {} lamports", refund_amount);
-    Ok(())
+            match res {
+                Ok(()) => {
+                    msg!("Refunded: {} lamports", refund_amount);
+                    Ok(())
+                }
+                Err(arg) => Err(arg),
+            }
+        }
+        None => Err(ProgramError::ArithmeticOverflow),
+    }
 }
