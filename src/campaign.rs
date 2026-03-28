@@ -60,7 +60,7 @@ pub fn create_new_campaign(
         claimed: false,
     };
 
-    let span = borsh::to_vec(&campaign)?.len();
+    let span = std::mem::size_of::<Campaign>();
     let lamports = Rent::get()?.minimum_balance(span);
 
     invoke(
@@ -167,7 +167,18 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
                 payer_acc.key.as_ref(),
                 &[bump],
             ]],
-        );
+        )?;
+
+        invoke_signed(
+            &system_instruction::assign(donation_record_acc.key, program_id),
+            &[donation_record_acc.clone(), system_program.clone()],
+            &[&[
+                b"donation",
+                campaign_acc.key.as_ref(),
+                payer_acc.key.as_ref(),
+                &[bump],
+            ]],
+        )?;
 
         record
     } else {
@@ -185,24 +196,31 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
 
     let opt = donation.amount.checked_add(amount);
     match opt {
-        Some(new_val) => {
-            campaign.raised = new_val;
+        Some(new_donation_val) => {
+            donation.amount = new_donation_val;
+            let opt = campaign.raised.checked_add(amount);
+            match opt {
+                Some(new_campaign_raised_val) => {
+                    campaign.raised = new_campaign_raised_val;
 
-            let res = donation
-                .serialize(&mut *donation_record_acc.data.borrow_mut())
-                .and_then(|_| campaign.serialize(&mut *campaign_acc.data.borrow_mut()))
-                .map_err(|_| ProgramError::BorshIoError);
+                    let res = donation
+                        .serialize(&mut *donation_record_acc.data.borrow_mut())
+                        .and_then(|_| campaign.serialize(&mut *campaign_acc.data.borrow_mut()))
+                        .map_err(|_| ProgramError::BorshIoError);
 
-            match res {
-                Ok(()) => {
-                    msg!(
-                        "Contributed: {} lamports, total={}",
-                        amount,
-                        campaign.raised
-                    );
-                    Ok(())
+                    match res {
+                        Ok(()) => {
+                            msg!(
+                                "Contributed: {} lamports, total={}",
+                                amount,
+                                campaign.raised
+                            );
+                            Ok(())
+                        }
+                        Err(arg) => Err(arg),
+                    }
                 }
-                Err(arg) => Err(arg),
+                None => Err(ProgramError::ArithmeticOverflow),
             }
         }
         None => Err(ProgramError::ArithmeticOverflow),
