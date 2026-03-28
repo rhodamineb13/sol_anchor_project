@@ -101,6 +101,10 @@ pub fn contribute(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) ->
         return Err(ProgramError::MissingRequiredSignature);
     }
 
+    if campaign_acc.owner != program_id {
+        return Err(ProgramError::InvalidAccountOwner);
+    }
+
     let mut campaign = Campaign::try_from_slice(&campaign_acc.data.borrow())?;
     if campaign.claimed {
         return Err(ProgramError::InvalidAccountData);
@@ -221,6 +225,10 @@ pub fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult 
         return Err(ProgramError::MissingRequiredSignature);
     }
 
+    if campaign_acc.owner != program_id {
+        return Err(ProgramError::InvalidAccountOwner);
+    }
+
     let clock = Clock::get()?;
     if campaign.raised < campaign.goal || clock.unix_timestamp < campaign.deadline {
         return Err(ProgramError::InvalidArgument);
@@ -269,6 +277,10 @@ pub fn refund(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
 
     let mut campaign = Campaign::try_from_slice(&campaign_acc.data.borrow())?;
     let clock = Clock::get()?;
+
+    if campaign_acc.owner != program_id {
+        return Err(ProgramError::InvalidAccountOwner);
+    }
 
     if campaign.raised >= campaign.goal || clock.unix_timestamp < campaign.deadline {
         return Err(ProgramError::InvalidArgument);
