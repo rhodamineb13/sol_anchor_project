@@ -25,7 +25,7 @@ pub fn process_instruction(
     let cmd = Instructions::try_from_slice(_instruction_data)?;
     match cmd {
         Instructions::CreateNewAccount(goal, deadline) => {
-            create_new_campaign(accounts, program_id, goal, deadline)
+            create_new_campaign(program_id, accounts, goal, deadline)
         }
         Instructions::Contribute(amount) => contribute(program_id, accounts, amount),
         Instructions::Withdraw => withdraw(program_id, accounts),
